@@ -394,7 +394,7 @@ func (m *dockerComposeManager) applyMetadata(ctx context.Context, ds compose.Dat
 
 func (m *dockerComposeManager) hasuraHealthcheck() (bool, error) {
 	// curl /healthz and check for 200
-	resp, err := http.Get("http://localhost:8080/healthz")
+	resp, err := http.Get("http://localhost:8080/healthz") // TODO: port
 	if err != nil {
 		return false, err
 	}

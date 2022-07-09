@@ -225,6 +225,12 @@ func (c Config) mailhogService() *types.ServiceConfig {
 				Published: "1025",
 				Protocol:  "tcp",
 			},
+			{
+				Mode:      "ingress",
+				Target:    8025,
+				Published: "8025",
+				Protocol:  "tcp",
+			},
 		},
 		Volumes: []types.ServiceVolumeConfig{
 			{
@@ -265,15 +271,8 @@ func (c Config) minioService() *types.ServiceConfig {
 		Environment: c.minioServiceEnvs().dockerServiceConfigEnv(),
 		Restart:     types.RestartPolicyAlways,
 		Image:       c.serviceDockerImage(SvcMinio, svcMinioDefaultImage),
-		Command:     []string{"server", "/data", "--console-address", ":8484"}, // TODO: port
-		Ports: []types.ServicePortConfig{
-			{
-				Mode:      "ingress",
-				Target:    8484, // TODO: port
-				Published: "8484",
-				Protocol:  "tcp",
-			},
-		},
+		Command:     []string{"server", "/data", "--address", "0.0.0.0:9000", "--console-address", "0.0.0.0:8484"}, // TODO: port
+		Expose:      []string{"9000", "8484"},
 		Volumes: []types.ServiceVolumeConfig{
 			{
 				Type:   types.VolumeTypeBind,
@@ -343,7 +342,7 @@ func (c Config) functionsService() *types.ServiceConfig {
 
 func (c Config) storageServiceEnvs() env {
 	minioEnv := c.minioServiceEnvs()
-	s3Endpoint := "http://minio:8484" // TODO: port
+	s3Endpoint := "http://minio:9000"
 
 	if minioConf, ok := c.nhostConfig.Services[SvcMinio]; ok {
 		if minioConf.NoContainer {
@@ -352,8 +351,9 @@ func (c Config) storageServiceEnvs() env {
 	}
 
 	e := env{
-		"BIND":                        ":8576",                 // TODO: port
-		"PUBLIC_URL":                  "http://localhost:8576", // TODO: port
+		"DEBUG":                       "true",
+		"BIND":                        ":8576",
+		"PUBLIC_URL":                  "http://localhost:8576",
 		"POSTGRES_MIGRATIONS":         "1",
 		"HASURA_METADATA":             "1",
 		"HASURA_ENDPOINT":             c.envValueHasuraEndpoint(),
@@ -394,7 +394,7 @@ func (c Config) storageService() *types.ServiceConfig {
 		Environment: c.storageServiceEnvs().dockerServiceConfigEnv(),
 		Labels:      labels,
 		Command:     []string{"serve"},
-		Expose:      []string{"8000"},
+		Expose:      []string{"8576"},
 	}
 }
 
@@ -581,12 +581,12 @@ func (c Config) hasuraConsoleService() *types.ServiceConfig {
 				Condition: types.ServiceConditionHealthy,
 			},
 		},
+		Expose: []string{"9695"},
 		Ports: []types.ServicePortConfig{
 			{
-				Mode:      "ingress",
-				Target:    9695, // TODO: port
-				Published: "9695",
-				Protocol:  "tcp",
+				Mode:     "ingress",
+				Target:   9695,
+				Protocol: "tcp",
 			},
 			{
 				Mode:      "ingress",
@@ -675,10 +675,9 @@ func (c Config) traefikService() *types.ServiceConfig {
 				Protocol:  "tcp",
 			},
 			{
-				Mode:      "ingress",
-				Target:    8080,
-				Published: "9090",
-				Protocol:  "tcp",
+				Mode:     "ingress",
+				Target:   8080,
+				Protocol: "tcp",
 			},
 		},
 		Volumes: []types.ServiceVolumeConfig{
