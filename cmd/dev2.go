@@ -38,6 +38,7 @@ import (
 	"github.com/spf13/cobra"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -105,7 +106,12 @@ var dev2Cmd = &cobra.Command{
 			return fmt.Errorf("failed to read .env.development: %v", err)
 		}
 
-		ports := compose.DefaultPorts()
+		proxyPort, err := strconv.Atoi(cmd.Flag("port").Value.String())
+		if err != nil {
+			return fmt.Errorf("failed to parse port: %v", err)
+		}
+
+		ports := compose.NewPorts(uint32(proxyPort))
 		mgr = service.NewDockerComposeManager(config, ports, env, nhost.GetCurrentBranch(), projectName, log, status, logger.DEBUG)
 		gw := watcher.NewGitWatcher(status, log)
 
@@ -171,7 +177,7 @@ var dev2Cmd = &cobra.Command{
 			}
 
 			if !noBrowser {
-				openbrowser(fmt.Sprintf("http://localhost:%s", cmd.Flag("port").Value.String()))
+				openbrowser(fmt.Sprintf("http://localhost:%d", ports[compose.SvcTraefik]))
 			}
 		}()
 

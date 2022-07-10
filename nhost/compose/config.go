@@ -677,6 +677,7 @@ func (c Config) traefikService() *types.ServiceConfig {
 			"--api.insecure=true",
 			"--providers.docker=true",
 			"--providers.docker.exposedbydefault=false",
+			fmt.Sprintf("--providers.docker.constraints=Label(`com.docker.compose.project`,`%s`)", c.composeProjectName),
 			fmt.Sprintf("--entrypoints.web.address=:%d", serverDefaultPort),
 		},
 	}

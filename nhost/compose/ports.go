@@ -20,3 +20,9 @@ func DefaultPorts() Ports {
 		SvcHasuraConsole: hasuraConsoleMigrateAPIDefaultPort,
 	}
 }
+
+func NewPorts(proxy uint32) Ports {
+	p := DefaultPorts()
+	p[SvcTraefik] = proxy
+	return p
+}
