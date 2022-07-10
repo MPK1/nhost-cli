@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/avast/retry-go/v4"
 	"github.com/nhost/cli/nhost"
@@ -84,11 +85,139 @@ func (m *dockerComposeManager) SetGitBranch(gitBranch string) {
 	m.composeConfig = compose.NewConfig(m.nhostConfig, m.ports, m.env, gitBranch, m.projectName)
 }
 
+func (m *dockerComposeManager) checkPorts(ctx context.Context, ds *compose.DataStreams) error {
+	select {
+	case <-ctx.Done():
+		return nil
+	default:
+	}
+
+	type composeSvc struct {
+		Service    string `json:"Service"`
+		Publishers []struct {
+			PublishedPort uint32 `json:"PublishedPort"`
+		}
+	}
+
+	cmd, err := compose.WrapperCmd(ctx, []string{"ps", "--filter", "status=running", "--format", "json"}, m.composeConfig, nil)
+	if err != nil && ctx.Err() != context.Canceled {
+		m.status.Error("Failed to list running services")
+		m.l.WithError(err).Debug("Failed to list running services")
+		return err
+	}
+
+	m.setProcessToStartInItsOwnProcessGroup(cmd)
+	out, err := cmd.CombinedOutput()
+	if err != nil && ctx.Err() != context.Canceled {
+		m.status.Error("Failed to list running services")
+		m.l.WithError(err).Debug("Failed to list running services")
+		return err
+	}
+
+	var svcs []composeSvc
+	err = json.Unmarshal(out, &svcs)
+	if err != nil {
+		m.status.Error("Failed to list running services")
+		m.l.WithError(err).Debug("Failed to list running services")
+		return err
+	}
+
+	runningSvcs := make(map[string]composeSvc)
+
+	for _, svc := range svcs {
+		runningSvcs[svc.Service] = svc
+	}
+
+	randomizerFunc := func(port uint32, timeout time.Duration) (uint32, error) {
+		t := time.After(timeout)
+
+		for i := 0; i < 1024; i++ {
+			select {
+			case <-t:
+				return 0, fmt.Errorf("timed out on ports randomize")
+			default:
+				if util.PortAvailable(fmt.Sprint(port)) {
+					return port, nil
+				}
+
+				port++
+			}
+		}
+
+		return 0, fmt.Errorf("failed to find available port")
+	}
+
+	portPublishedForSvc := func(port uint32, svc composeSvc) bool {
+		for _, p := range svc.Publishers {
+			if p.PublishedPort == 0 {
+				continue
+			}
+
+			if p.PublishedPort == port {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	for svcName, port := range m.ports {
+		if util.PortAvailable(fmt.Sprint(port)) {
+			continue
+		}
+
+		// if service is running
+		if svc, ok := runningSvcs[svcName]; ok {
+			// the port is used by the service
+			if portPublishedForSvc(port, svc) {
+				continue
+			}
+
+			// otherwise, we need to randomize the port
+			randomPort, err := randomizerFunc(port+1, time.Second*10)
+			if err != nil {
+				m.status.Error(fmt.Sprintf("Failed to find available port for %s", svc.Service))
+				m.l.WithError(err).Debugf("Failed to find available port for %s", svc.Service)
+				return err
+			}
+
+			// assign the random port to the service
+			m.ports[svcName] = randomPort
+			continue
+		}
+
+		randomPort, err := randomizerFunc(port+1, time.Second*10)
+		if err != nil {
+			m.status.Error(fmt.Sprintf("Failed to find available port for %s", svcName))
+			m.l.WithError(err).Debugf("Failed to find available port for %s", svcName)
+			return err
+		}
+
+		// assign the random port to the service
+		m.ports[svcName] = randomPort
+	}
+
+	// reinitialize the compose config with new ports
+	m.composeConfig = compose.NewConfig(m.nhostConfig, m.ports, m.env, m.branch, m.projectName)
+
+	return nil
+}
+
 func (m *dockerComposeManager) Start(ctx context.Context) error {
 	ds := &compose.DataStreams{}
 	if m.debug {
 		ds.Stdout = os.Stdout
 		ds.Stderr = os.Stderr
+	}
+
+	// ports
+	{
+		m.status.Executing("Checking ports...")
+		m.l.Debug("Checking ports")
+		err := m.checkPorts(ctx, ds)
+		if err != nil {
+			return err
+		}
 	}
 
 	m.status.Executing("Starting nhost app...")
