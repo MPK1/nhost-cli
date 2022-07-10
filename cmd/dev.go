@@ -32,6 +32,7 @@ import (
 	"github.com/nhost/cli/logger"
 	"github.com/nhost/cli/nhost/compose"
 	"github.com/nhost/cli/nhost/service"
+	"github.com/nhost/cli/watcher"
 	"os"
 	"os/signal"
 	"strconv"
@@ -99,6 +100,46 @@ var devCmd = &cobra.Command{
 
 		ports := compose.NewPorts(uint32(proxyPort))
 		mgr = service.NewDockerComposeManager(config, ports, env, nhost.GetCurrentBranch(), projectName, log, status, logger.DEBUG)
+		gw := watcher.NewGitWatcher(status, log)
+
+		go gw.Watch(ctx, 700*time.Millisecond, func(branch, ref string) error {
+			err := retry.Do(func() error {
+				err := mgr.SyncExec(ctx, func(ctx context.Context) error {
+					branchWithRef := fmt.Sprintf("Using branch %s", branch)
+					if ref != "" {
+						branchWithRef = fmt.Sprintf("Using branch %s [#%s]", branch, ref[:7])
+					}
+
+					status.Executingln(branchWithRef)
+					mgr.SetGitBranch(branch)
+					err := mgr.StopSvc(ctx, compose.SvcPostgres, compose.SvcStorage, compose.SvcAuth)
+					if err != nil {
+						status.Errorln("Failed to stop postgres")
+						return err
+					}
+
+					err = mgr.Start(ctx)
+					if err != nil {
+						status.Errorln("Failed to start services")
+						return err
+					}
+
+					if err != nil {
+						status.Errorln("Failed to restart services")
+						return err
+					}
+
+					return nil
+				})
+
+				if err != nil {
+					return err
+				}
+				return nil
+			}, retry.Attempts(3))
+
+			return err
+		})
 
 		signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
