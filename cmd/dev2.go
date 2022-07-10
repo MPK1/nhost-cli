@@ -31,6 +31,7 @@ import (
 	"github.com/avast/retry-go/v4"
 	"github.com/nhost/cli/logger"
 	"github.com/nhost/cli/nhost"
+	"github.com/nhost/cli/nhost/compose"
 	"github.com/nhost/cli/nhost/service"
 	"github.com/nhost/cli/util"
 	"github.com/nhost/cli/watcher"
@@ -104,7 +105,8 @@ var dev2Cmd = &cobra.Command{
 			return fmt.Errorf("failed to read .env.development: %v", err)
 		}
 
-		mgr = service.NewDockerComposeManager(config, env, nhost.GetCurrentBranch(), projectName, log, status, logger.DEBUG)
+		ports := compose.DefaultPorts()
+		mgr = service.NewDockerComposeManager(config, ports, env, nhost.GetCurrentBranch(), projectName, log, status, logger.DEBUG)
 		gw := watcher.NewGitWatcher(status, log)
 
 		go gw.Watch(ctx, 700*time.Millisecond, func(branch, ref string) error {
@@ -117,7 +119,7 @@ var dev2Cmd = &cobra.Command{
 
 					status.Executingln(branchWithRef)
 					mgr.SetGitBranch(branch)
-					err := mgr.StopSvc(ctx, "postgres")
+					err := mgr.StopSvc(ctx, compose.SvcPostgres, compose.SvcStorage, compose.SvcAuth)
 					if err != nil {
 						status.Errorln("Failed to stop postgres")
 						return err

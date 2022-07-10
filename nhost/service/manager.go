@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/avast/retry-go/v4"
 	"github.com/nhost/cli/nhost"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -32,22 +34,23 @@ type Manager interface {
 	SyncExec(ctx context.Context, f func(ctx context.Context) error) error
 	Start(ctx context.Context) error
 	Stop(ctx context.Context) error
-	StopSvc(ctx context.Context, svc string) error
+	StopSvc(ctx context.Context, svc ...string) error
 	SetGitBranch(string)
 }
 
-func NewDockerComposeManager(c *nhost.Configuration, env []string, gitBranch string, projectName string, logger logrus.FieldLogger, status *util.Status, debug bool) *dockerComposeManager {
+func NewDockerComposeManager(c *nhost.Configuration, ports compose.Ports, env []string, gitBranch string, projectName string, logger logrus.FieldLogger, status *util.Status, debug bool) *dockerComposeManager {
 	if gitBranch == "" {
 		gitBranch = "main"
 	}
 
 	return &dockerComposeManager{
+		ports:         ports,
 		debug:         debug,
 		env:           env,
 		branch:        gitBranch,
 		projectName:   projectName,
 		nhostConfig:   c,
-		composeConfig: compose.NewConfig(c, env, gitBranch, projectName),
+		composeConfig: compose.NewConfig(c, ports, env, gitBranch, projectName),
 		l:             logger,
 		status:        status,
 	}
@@ -55,6 +58,7 @@ func NewDockerComposeManager(c *nhost.Configuration, env []string, gitBranch str
 
 type dockerComposeManager struct {
 	sync.Mutex
+	ports         compose.Ports
 	debug         bool
 	branch        string
 	projectName   string
@@ -78,14 +82,142 @@ func (m *dockerComposeManager) SetGitBranch(gitBranch string) {
 	}
 
 	m.branch = gitBranch
-	m.composeConfig = compose.NewConfig(m.nhostConfig, m.env, gitBranch, m.projectName)
+	m.composeConfig = compose.NewConfig(m.nhostConfig, m.ports, m.env, gitBranch, m.projectName)
+}
+
+func (m *dockerComposeManager) checkPorts(ctx context.Context, ds *compose.DataStreams) error {
+	select {
+	case <-ctx.Done():
+		return nil
+	default:
+	}
+
+	type composeSvc struct {
+		Service    string `json:"Service"`
+		Publishers []struct {
+			PublishedPort uint32 `json:"PublishedPort"`
+		}
+	}
+
+	cmd, err := compose.WrapperCmd(ctx, []string{"ps", "--filter", "status=running", "--format", "json"}, m.composeConfig, nil)
+	if err != nil && ctx.Err() != context.Canceled {
+		m.status.Error("Failed to list running services")
+		m.l.WithError(err).Debug("Failed to list running services")
+		return err
+	}
+
+	m.setProcessToStartInItsOwnProcessGroup(cmd)
+	out, err := cmd.CombinedOutput()
+	if err != nil && ctx.Err() != context.Canceled {
+		m.status.Error("Failed to list running services")
+		m.l.WithError(err).Debug("Failed to list running services")
+		return err
+	}
+
+	var svcs []composeSvc
+	err = json.Unmarshal(out, &svcs)
+	if err != nil {
+		m.status.Error("Failed to list running services")
+		m.l.WithError(err).Debug("Failed to list running services")
+		return err
+	}
+
+	runningSvcs := make(map[string]composeSvc)
+
+	for _, svc := range svcs {
+		runningSvcs[svc.Service] = svc
+	}
+
+	randomizerFunc := func(port uint32, timeout time.Duration) (uint32, error) {
+		t := time.After(timeout)
+
+		for i := 0; i < 1024; i++ {
+			select {
+			case <-t:
+				return 0, fmt.Errorf("timed out on ports randomize")
+			default:
+				if util.PortAvailable(fmt.Sprint(port)) {
+					return port, nil
+				}
+
+				port++
+			}
+		}
+
+		return 0, fmt.Errorf("failed to find available port")
+	}
+
+	portPublishedForSvc := func(port uint32, svc composeSvc) bool {
+		for _, p := range svc.Publishers {
+			if p.PublishedPort == 0 {
+				continue
+			}
+
+			if p.PublishedPort == port {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	for svcName, port := range m.ports {
+		if util.PortAvailable(fmt.Sprint(port)) {
+			continue
+		}
+
+		// if service is running
+		if svc, ok := runningSvcs[svcName]; ok {
+			// the port is used by the service
+			if portPublishedForSvc(port, svc) {
+				continue
+			}
+
+			// otherwise, we need to randomize the port
+			randomPort, err := randomizerFunc(port+1, time.Second*10)
+			if err != nil {
+				m.status.Error(fmt.Sprintf("Failed to find available port for %s", svc.Service))
+				m.l.WithError(err).Debugf("Failed to find available port for %s", svc.Service)
+				return err
+			}
+
+			// assign the random port to the service
+			m.ports[svcName] = randomPort
+			continue
+		}
+
+		randomPort, err := randomizerFunc(port+1, time.Second*10)
+		if err != nil {
+			m.status.Error(fmt.Sprintf("Failed to find available port for %s", svcName))
+			m.l.WithError(err).Debugf("Failed to find available port for %s", svcName)
+			return err
+		}
+
+		// assign the random port to the service
+		m.ports[svcName] = randomPort
+	}
+
+	// reinitialize the compose config with new ports
+	m.composeConfig = compose.NewConfig(m.nhostConfig, m.ports, m.env, m.branch, m.projectName)
+
+	return nil
 }
 
 func (m *dockerComposeManager) Start(ctx context.Context) error {
-	ds := compose.DataStreams{}
+	ds := &compose.DataStreams{}
 	if m.debug {
 		ds.Stdout = os.Stdout
 		ds.Stderr = os.Stderr
+	}
+
+	// ports
+	{
+		m.status.Executing("Checking ports...")
+		m.l.Debug("Checking ports")
+		err := m.checkPorts(ctx, ds)
+		if err != nil {
+			return err
+		}
 	}
 
 	m.status.Executing("Starting nhost app...")
@@ -200,12 +332,14 @@ func (m *dockerComposeManager) Start(ctx context.Context) error {
 	}
 
 	m.status.Info("Ready to use")
+	m.l.Debug("Ready to use")
+
 	return nil
 }
 
 func (m *dockerComposeManager) Stop(ctx context.Context) error {
 	m.l.Debug("Stopping docker compose")
-	cmd, err := compose.WrapperCmd(ctx, []string{"stop"}, m.composeConfig, compose.DataStreams{})
+	cmd, err := compose.WrapperCmd(ctx, []string{"stop"}, m.composeConfig, &compose.DataStreams{})
 	if err != nil {
 		m.l.WithError(err).Debug("Failed to stop docker compose")
 		return err
@@ -215,10 +349,10 @@ func (m *dockerComposeManager) Stop(ctx context.Context) error {
 	return cmd.Run()
 }
 
-func (m *dockerComposeManager) StopSvc(ctx context.Context, svc string) error {
-	m.status.Executing(fmt.Sprintf("Stopping service %s", svc))
-	m.l.Debugf("Stopping %s service", svc)
-	cmd, err := compose.WrapperCmd(ctx, []string{"stop", svc}, m.composeConfig, compose.DataStreams{})
+func (m *dockerComposeManager) StopSvc(ctx context.Context, svc ...string) error {
+	m.status.Executing(fmt.Sprintf("Stopping service(s) %s", strings.Join(svc, ", ")))
+	m.l.Debugf("Stopping %s service(s)", strings.Join(svc, ", "))
+	cmd, err := compose.WrapperCmd(ctx, append([]string{"stop"}, svc...), m.composeConfig, nil)
 	if err != nil {
 		m.l.WithError(err).Debugf("Failed to stop %s service", svc)
 		return err
@@ -228,7 +362,7 @@ func (m *dockerComposeManager) StopSvc(ctx context.Context, svc string) error {
 	return cmd.Run()
 }
 
-func (m *dockerComposeManager) waitForServicesToBeRunningHealthy(ctx context.Context, ds compose.DataStreams) error {
+func (m *dockerComposeManager) waitForServicesToBeRunningHealthy(ctx context.Context, ds *compose.DataStreams) error {
 	select {
 	case <-ctx.Done():
 		return nil
@@ -253,23 +387,16 @@ func (m *dockerComposeManager) waitForServicesToBeRunningHealthy(ctx context.Con
 	return nil
 }
 
-//func (m *dockerComposeManager) restartAuthStorageContainers(ctx context.Context, ds compose.DataStreams) error {
-//	m.l.Debug("Restarting auth and storage containers")
-//	c, err := compose.WrapperCmd(ctx, []string{"restart", "auth", "storage"}, m.composeConfig, ds)
-//	if err != nil && ctx.Err() != context.Canceled {
-//		return fmt.Errorf("failed to restart auth and storage containers: %w", err)
-//	}
-//
-//	m.setProcessToStartInItsOwnProcessGroup(c)
-//	return c.Run()
-//}
-
 // applySeeds applies seeds if they were not applied
-func (m *dockerComposeManager) applySeeds(ctx context.Context, ds compose.DataStreams) error {
+func (m *dockerComposeManager) applySeeds(ctx context.Context, ds *compose.DataStreams) error {
 	select {
 	case <-ctx.Done():
 		return nil
 	default:
+	}
+
+	if !util.PathExists(filepath.Join(nhost.SEEDS_DIR, nhost.DATABASE)) {
+		return nil
 	}
 
 	seedsFlagFile := filepath.Join(util.WORKING_DIR, ".nhost/seeds.applied")
@@ -300,7 +427,7 @@ func (m *dockerComposeManager) applySeeds(ctx context.Context, ds compose.DataSt
 	return ioutil.WriteFile(seedsFlagFile, []byte{}, 0644)
 }
 
-func (m *dockerComposeManager) applyMigrations(ctx context.Context, ds compose.DataStreams) error {
+func (m *dockerComposeManager) applyMigrations(ctx context.Context, ds *compose.DataStreams) error {
 	select {
 	case <-ctx.Done():
 		return nil
@@ -338,7 +465,7 @@ func (m *dockerComposeManager) setProcessToStartInItsOwnProcessGroup(cmd *exec.C
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func (m *dockerComposeManager) exportMetadata(ctx context.Context, ds compose.DataStreams) error {
+func (m *dockerComposeManager) exportMetadata(ctx context.Context, ds *compose.DataStreams) error {
 	m.status.Executing("Exporting metadata...")
 	err := retry.Do(func() error {
 		m.l.Debug("Exporting metadata")
@@ -365,7 +492,7 @@ func (m *dockerComposeManager) exportMetadata(ctx context.Context, ds compose.Da
 	return err
 }
 
-func (m *dockerComposeManager) applyMetadata(ctx context.Context, ds compose.DataStreams) error {
+func (m *dockerComposeManager) applyMetadata(ctx context.Context, ds *compose.DataStreams) error {
 	m.status.Executing("Applying metadata...")
 	err := retry.Do(func() error {
 		m.l.Debug("Applying metadata")
@@ -393,8 +520,9 @@ func (m *dockerComposeManager) applyMetadata(ctx context.Context, ds compose.Dat
 }
 
 func (m *dockerComposeManager) hasuraHealthcheck() (bool, error) {
-	// curl /healthz and check for 200
-	resp, err := http.Get("http://localhost:8080/healthz") // TODO: port
+	graphqlPort := m.ports[compose.SvcGraphqlEngine]
+	// GET /healthz and check for 200
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/healthz", graphqlPort))
 	if err != nil {
 		return false, err
 	}

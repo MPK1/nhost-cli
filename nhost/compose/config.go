@@ -75,24 +75,22 @@ const (
 	envMinioRootPasswordDefaultValue = "minioaccesskey123123"
 
 	// --
-
-	// default ports
-	serverDefaultPort      = 1337
-	svcPostgresDefaultPort = 5432
-	svcHasuraDefaultPort   = 8080
-	// --
 )
 
 type Config struct {
-	nhostConfig        *nhost.Configuration // nhost configuration to read custom values from, not used atm
+	nhostConfig        *nhost.Configuration // nhost configuration
 	gitBranch          string               // git branch name, used as a namespace for postgres data mounted from host
 	composeConfig      *types.Config
 	composeProjectName string
 	dotenv             []string // environment variables from .env file
+	ports              Ports
 }
 
-func NewConfig(conf *nhost.Configuration, env []string, gitBranch, projectName string) *Config {
-	return &Config{nhostConfig: conf, dotenv: env, gitBranch: gitBranch, composeProjectName: projectName}
+func NewConfig(conf *nhost.Configuration, p Ports, env []string, gitBranch, projectName string) *Config {
+	if p == nil {
+		p = DefaultPorts()
+	}
+	return &Config{nhostConfig: conf, ports: p, dotenv: env, gitBranch: gitBranch, composeProjectName: projectName}
 }
 
 func (c Config) serviceDockerImage(svcName, dockerImageFallback string) string {
@@ -103,16 +101,6 @@ func (c Config) serviceDockerImage(svcName, dockerImageFallback string) string {
 	}
 
 	return dockerImageFallback
-}
-
-func (c Config) serviceDockerExposePort(svcName string, fallbackPort uint32) uint32 {
-	if svcConf, ok := c.nhostConfig.Services[svcName]; ok {
-		if svcConf.Port != 0 {
-			return uint32(svcConf.Port)
-		}
-	}
-
-	return fallbackPort
 }
 
 // serviceConfigEnvs returns environment variables from "services".$name."environment" section in yaml config
@@ -177,7 +165,7 @@ func (c Config) postgresConnectionString() string {
 	password := postgresEnv[envPostgresPassword]
 	db := postgresEnv[envPostgresDb]
 
-	return fmt.Sprintf("postgres://%s:%s@postgres:5432/%s", user, password, db)
+	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s", user, password, SvcPostgres, svcPostgresDefaultPort, db)
 }
 
 func (c Config) mailhogServiceEnvs() env {
@@ -222,14 +210,14 @@ func (c Config) mailhogService() *types.ServiceConfig {
 			{
 				Mode:      "ingress",
 				Target:    1025,
-				Published: "1025",
+				Published: fmt.Sprint(c.ports[SvcMailhog]),
 				Protocol:  "tcp",
 			},
 			{
-				Mode:      "ingress",
-				Target:    8025,
-				Published: "8025",
-				Protocol:  "tcp",
+				Mode:   "ingress",
+				Target: 8025,
+				//Published: "8025", // TODO: add to traefik
+				Protocol: "tcp",
 			},
 		},
 		Volumes: []types.ServiceVolumeConfig{
@@ -271,7 +259,7 @@ func (c Config) minioService() *types.ServiceConfig {
 		Environment: c.minioServiceEnvs().dockerServiceConfigEnv(),
 		Restart:     types.RestartPolicyAlways,
 		Image:       c.serviceDockerImage(SvcMinio, svcMinioDefaultImage),
-		Command:     []string{"server", "/data", "--address", "0.0.0.0:9000", "--console-address", "0.0.0.0:8484"}, // TODO: port
+		Command:     []string{"server", "/data", "--address", "0.0.0.0:9000", "--console-address", "0.0.0.0:8484"}, // TODO: add UI access via traefik
 		Expose:      []string{"9000", "8484"},
 		Volumes: []types.ServiceVolumeConfig{
 			{
@@ -356,7 +344,7 @@ func (c Config) storageServiceEnvs() env {
 		"PUBLIC_URL":                  "http://localhost:8576",
 		"POSTGRES_MIGRATIONS":         "1",
 		"HASURA_METADATA":             "1",
-		"HASURA_ENDPOINT":             c.envValueHasuraEndpoint(),
+		"HASURA_ENDPOINT":             c.hasuraEndpoint(),
 		"HASURA_GRAPHQL_ADMIN_SECRET": util.ADMIN_SECRET,
 		"S3_ACCESS_KEY":               minioEnv[envMinioRootUser],
 		"S3_SECRET_KEY":               minioEnv[envMinioRootPassword],
@@ -399,12 +387,10 @@ func (c Config) storageService() *types.ServiceConfig {
 }
 
 func (c Config) authServiceEnvs() env {
-	hasuraPort := c.serviceDockerExposePort(SvcHasura, svcHasuraDefaultPort)
-
 	e := env{
 		"AUTH_HOST":                   "0.0.0.0",
 		"HASURA_GRAPHQL_DATABASE_URL": c.postgresConnectionString(),
-		"HASURA_GRAPHQL_GRAPHQL_URL":  fmt.Sprintf("http://graphql-engine:%d/v1/graphql", hasuraPort),
+		"HASURA_GRAPHQL_GRAPHQL_URL":  fmt.Sprintf("%s/graphql", c.hasuraEndpoint()),
 		"HASURA_GRAPHQL_JWT_SECRET":   c.envValueHasuraGraphqlJwtSecret(),
 		"HASURA_GRAPHQL_ADMIN_SECRET": util.ADMIN_SECRET,
 		"NHOST_ADMIN_SECRET":          util.ADMIN_SECRET,
@@ -468,16 +454,15 @@ func (c Config) authService() *types.ServiceConfig {
 }
 
 func (c Config) envValueNhostBackendUrl() string {
-	return "http://traefik:1337" // TODO: port
+	return "http://traefik:1337"
 }
 
 func (c Config) envValueHasuraGraphqlJwtSecret() string {
 	return fmt.Sprintf(`{"type":"HS256", "key": "%s"}`, util.JWT_KEY)
 }
 
-func (c Config) envValueHasuraEndpoint() string {
-	hasuraPort := c.serviceDockerExposePort(SvcHasura, svcHasuraDefaultPort)
-	return fmt.Sprintf("http://graphql-engine:%d/v1", hasuraPort)
+func (c Config) hasuraEndpoint() string {
+	return fmt.Sprintf("http://graphql-engine:%d/v1", svcHasuraDefaultPort)
 }
 
 func (c Config) hasuraServiceEnvs() env {
@@ -510,19 +495,16 @@ func (c Config) hasuraService() *types.ServiceConfig {
 		"traefik.http.routers.hasura.entrypoints": "web",
 	}
 
-	port := c.serviceDockerExposePort(SvcHasura, svcHasuraDefaultPort)
-
 	return &types.ServiceConfig{
 		Name:        SvcGraphqlEngine,
 		Image:       c.serviceDockerImage(SvcHasura, svcHasuraDefaultImage),
 		Environment: c.hasuraServiceEnvs().dockerServiceConfigEnv(),
-		Expose:      []string{"8080"}, // TODO: is it needed?
 		Labels:      labels,
-		Ports: []types.ServicePortConfig{ // TODO: is it needed?
+		Ports: []types.ServicePortConfig{
 			{
 				Mode:      "ingress",
 				Target:    svcHasuraDefaultPort,
-				Published: fmt.Sprint(port),
+				Published: fmt.Sprint(c.ports[SvcGraphqlEngine]),
 				Protocol:  "tcp",
 			},
 		},
@@ -539,13 +521,11 @@ func (c Config) hasuraService() *types.ServiceConfig {
 }
 
 func (c Config) hasuraConsoleServiceEnvs() env {
-	hasuraPort := c.serviceDockerExposePort(SvcHasura, svcHasuraDefaultPort)
-
 	return env{
 		"HASURA_GRAPHQL_DATABASE_URL":              c.postgresConnectionString(),
 		"HASURA_GRAPHQL_JWT_SECRET":                c.envValueHasuraGraphqlJwtSecret(),
 		"HASURA_GRAPHQL_ADMIN_SECRET":              util.ADMIN_SECRET,
-		"HASURA_GRAPHQL_ENDPOINT":                  fmt.Sprintf("http://127.0.0.1:%d", hasuraPort),
+		"HASURA_GRAPHQL_ENDPOINT":                  fmt.Sprintf("http://127.0.0.1:%d", c.ports[SvcGraphqlEngine]),
 		"HASURA_GRAPHQL_UNAUTHORIZED_ROLE":         "public",
 		"HASURA_GRAPHQL_DEV_MODE":                  "true",
 		"HASURA_GRAPHQL_LOG_LEVEL":                 "debug",
@@ -554,13 +534,15 @@ func (c Config) hasuraConsoleServiceEnvs() env {
 		"HASURA_GRAPHQL_MIGRATIONS_SERVER_TIMEOUT": "20",
 		"HASURA_GRAPHQL_NO_OF_RETRIES":             "20",
 		"HASURA_GRAPHQL_ENABLE_TELEMETRY":          "false",
+		"GRAPHQL_PORT":                             fmt.Sprint(c.ports[SvcGraphqlEngine]),
+		"API_PORT":                                 fmt.Sprint(c.ports[SvcHasuraConsole]),
 	}
 }
 
 func (c Config) hasuraConsoleService() *types.ServiceConfig {
 	labels := map[string]string{
 		"traefik.enable": "true",
-		"traefik.http.services.hasura-console.loadbalancer.server.port": "9695", // TODO: port
+		"traefik.http.services.hasura-console.loadbalancer.server.port": "9695",
 		"traefik.http.routers.hasura-console.rule":                      "PathPrefix(`/`)",
 		"traefik.http.routers.hasura-console.entrypoints":               "web",
 	}
@@ -581,7 +563,6 @@ func (c Config) hasuraConsoleService() *types.ServiceConfig {
 				Condition: types.ServiceConditionHealthy,
 			},
 		},
-		Expose: []string{"9695"},
 		Ports: []types.ServicePortConfig{
 			{
 				Mode:     "ingress",
@@ -590,8 +571,8 @@ func (c Config) hasuraConsoleService() *types.ServiceConfig {
 			},
 			{
 				Mode:      "ingress",
-				Target:    9693, // TODO: port
-				Published: "9693",
+				Target:    9693,
+				Published: fmt.Sprint(c.ports[SvcHasuraConsole]),
 				Protocol:  "tcp",
 			},
 		},
@@ -622,16 +603,19 @@ func (c Config) postgresServiceEnvs() env {
 func (c Config) postgresServiceHealthcheck(interval, startPeriod time.Duration) *types.HealthCheckConfig {
 	i := types.Duration(interval)
 	s := types.Duration(startPeriod)
+
+	e := c.postgresServiceEnvs()
+	pgUser := e[envPostgresUser]
+	pgDb := e[envPostgresDb]
+
 	return &types.HealthCheckConfig{
-		Test:        []string{"CMD-SHELL", "pg_isready -U postgres -d postgres -q"}, // TODO: don't hardcode postgres user and db name
+		Test:        []string{"CMD-SHELL", fmt.Sprintf("pg_isready -U %s -d %s -q", pgUser, pgDb)},
 		Interval:    &i,
 		StartPeriod: &s,
 	}
 }
 
 func (c Config) postgresService() *types.ServiceConfig {
-	port := c.serviceDockerExposePort(SvcPostgres, svcPostgresDefaultPort)
-
 	return &types.ServiceConfig{
 		Name: SvcPostgres,
 		// keep in mind that the provided postgres image should create schemas and triggers like in https://github.com/nhost/postgres/blob/ea53451b6df9f4b10ce515a2cefbd9ddfdfadb25/v12/db/0001-create-schema.sql
@@ -649,8 +633,8 @@ func (c Config) postgresService() *types.ServiceConfig {
 		Ports: []types.ServicePortConfig{
 			{
 				Mode:      "ingress",
-				Target:    port,
-				Published: fmt.Sprint(port),
+				Target:    svcPostgresDefaultPort,
+				Published: fmt.Sprint(c.ports[SvcPostgres]),
 				Protocol:  "tcp",
 			},
 		},
@@ -658,11 +642,12 @@ func (c Config) postgresService() *types.ServiceConfig {
 }
 
 func (c Config) serverPort() uint32 {
-	return serverDefaultPort
+	return c.ports[SvcTraefik]
 }
 
 func (c Config) traefikService() *types.ServiceConfig {
 	port := c.serverPort()
+
 	return &types.ServiceConfig{
 		Name:    SvcTraefik,
 		Image:   c.serviceDockerImage(SvcTraefik, svcTraefikDefaultImage),

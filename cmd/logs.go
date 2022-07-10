@@ -67,8 +67,8 @@ var logsCmd = &cobra.Command{
 			return fmt.Errorf("failed to read .env.development: %v", err)
 		}
 
-		conf := compose.NewConfig(config, env, nhost.GetCurrentBranch(), projectName)
-		dc, err := compose.WrapperCmd(cmd.Context(), dcArgs, conf, compose.DataStreams{Stdout: os.Stdout, Stderr: os.Stderr})
+		conf := compose.NewConfig(config, nil, env, nhost.GetCurrentBranch(), projectName)
+		dc, err := compose.WrapperCmd(cmd.Context(), dcArgs, conf, &compose.DataStreams{Stdout: os.Stdout, Stderr: os.Stderr})
 		if err != nil {
 			return err
 		}

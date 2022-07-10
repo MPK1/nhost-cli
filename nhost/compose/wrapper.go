@@ -16,7 +16,7 @@ type DataStreams struct {
 	Stderr io.Writer
 }
 
-func WrapperCmd(ctx context.Context, args []string, conf *Config, streams DataStreams) (*exec.Cmd, error) {
+func WrapperCmd(ctx context.Context, args []string, conf *Config, streams *DataStreams) (*exec.Cmd, error) {
 	dockerComposeConfig, err := conf.BuildJSON()
 	if err != nil {
 		return nil, err
@@ -47,10 +47,12 @@ func WrapperCmd(ctx context.Context, args []string, conf *Config, streams DataSt
 
 	dc := exec.CommandContext(ctx, "docker", append([]string{"compose", "-p", conf.composeProjectName, "-f", composeConfigFilename}, args...)...)
 
-	// set streams
-	dc.Stdout = streams.Stdout
-	dc.Stderr = streams.Stderr
-	dc.Stdin = os.Stdin
+	if streams != nil {
+		// set streams
+		dc.Stdout = streams.Stdout
+		dc.Stderr = streams.Stderr
+		dc.Stdin = os.Stdin
+	}
 
 	return dc, nil
 }
