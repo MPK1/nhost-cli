@@ -214,9 +214,8 @@ func (c Config) mailhogService() *types.ServiceConfig {
 				Protocol:  "tcp",
 			},
 			{
-				Mode:   "ingress",
-				Target: 8025,
-				//Published: "8025", // TODO: add to traefik
+				Mode:     "ingress",
+				Target:   8025,
 				Protocol: "tcp",
 			},
 		},
@@ -259,8 +258,19 @@ func (c Config) minioService() *types.ServiceConfig {
 		Environment: c.minioServiceEnvs().dockerServiceConfigEnv(),
 		Restart:     types.RestartPolicyAlways,
 		Image:       c.serviceDockerImage(SvcMinio, svcMinioDefaultImage),
-		Command:     []string{"server", "/data", "--address", "0.0.0.0:9000", "--console-address", "0.0.0.0:8484"}, // TODO: add UI access via traefik
-		Expose:      []string{"9000", "8484"},
+		Command:     []string{"server", "/data", "--address", "0.0.0.0:9000", "--console-address", "0.0.0.0:8484"},
+		Ports: []types.ServicePortConfig{
+			{
+				Mode:     "ingress",
+				Target:   9000,
+				Protocol: "tcp",
+			},
+			{
+				Mode:     "ingress",
+				Target:   8484,
+				Protocol: "tcp",
+			},
+		},
 		Volumes: []types.ServiceVolumeConfig{
 			{
 				Type:   types.VolumeTypeBind,
@@ -441,7 +451,7 @@ func (c Config) authService() *types.ServiceConfig {
 		Volumes: []types.ServiceVolumeConfig{
 			{
 				Type:   types.VolumeTypeBind,
-				Source: filepath.Join(util.WORKING_DIR, ".nhost/custom"),
+				Source: filepath.Join(nhost.DOT_NHOST_DIR, "custom"),
 				Target: "/app/custom",
 			},
 			{

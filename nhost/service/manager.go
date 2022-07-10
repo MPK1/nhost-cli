@@ -399,7 +399,7 @@ func (m *dockerComposeManager) applySeeds(ctx context.Context, ds *compose.DataS
 		return nil
 	}
 
-	seedsFlagFile := filepath.Join(util.WORKING_DIR, ".nhost/seeds.applied")
+	seedsFlagFile := filepath.Join(nhost.DOT_NHOST_DIR, "seeds.applied")
 
 	if util.PathExists(seedsFlagFile) {
 		// seeds already applied

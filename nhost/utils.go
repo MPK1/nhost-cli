@@ -24,12 +24,8 @@ func ParseEnvVarsFromConfig(payload map[interface{}]interface{}, prefix string) 
 	return response
 }
 
-func GetContainerName(name string) string {
-	return fmt.Sprintf("%s_%s", PREFIX, name)
-}
-
 func GetDockerComposeProjectName() (string, error) {
-	data, err := ioutil.ReadFile(filepath.Join(util.WORKING_DIR, ".nhost/project_name"))
+	data, err := ioutil.ReadFile(filepath.Join(DOT_NHOST_DIR, "project_name"))
 	if err != nil {
 		return "", err
 	}
@@ -38,7 +34,7 @@ func GetDockerComposeProjectName() (string, error) {
 }
 
 func SetDockerComposeProjectName(name string) error {
-	return ioutil.WriteFile(filepath.Join(util.WORKING_DIR, ".nhost/project_name"), []byte(name), 0644)
+	return ioutil.WriteFile(filepath.Join(DOT_NHOST_DIR, "project_name"), []byte(name), 0644)
 }
 
 func GetCurrentBranch() string {

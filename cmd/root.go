@@ -40,8 +40,16 @@ import (
 	"time"
 )
 
-var (
+const (
+	ErrNotLoggedIn = "Please login with `nhost login`"
+	ErrLoggedIn    = "You are already logged in, first logout with `nhost logout`"
+)
 
+var (
+	Version string
+	cfgFile string
+	status  = &util.Writer
+	log     = &logger.Log
 	//  rootCmd represents the base command when called without any subcommands
 	rootCmd = &cobra.Command{
 		Use:   "nhost",
@@ -65,15 +73,8 @@ var (
 			//  resetUmask()
 
 			logger.Init()
-			util.Init(util.Config{
-				WorkingDir: path,
-			})
+			util.Init(util.Config{Writer: status})
 			nhost.Init()
-
-			if err := os.MkdirAll(filepath.Join(util.WORKING_DIR, ".nhost"), os.ModePerm); err != nil {
-				status.Errorln("Failed to initialize nhost data directory")
-				return err
-			}
 
 			if !util.PathExists(filepath.Join(util.WORKING_DIR, ".nhost/project_name")) {
 				rand.Seed(time.Now().UnixNano())
